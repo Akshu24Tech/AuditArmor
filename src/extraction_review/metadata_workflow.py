@@ -17,7 +17,7 @@ class MetadataResponse(StopEvent):
 
 
 class MetadataWorkflow(Workflow):
-    """Provide extraction schema and configuration to the workflow editor."""
+    """Provide compliance analysis schema and configuration to the workflow editor."""
 
     @step
     async def get_metadata(
@@ -28,8 +28,8 @@ class MetadataWorkflow(Workflow):
             ResourceConfig(
                 config_file="configs/config.json",
                 path_selector="extract.json_schema",
-                label="Extraction Schema",
-                description="JSON Schema defining the fields to extract from documents",
+                label="Compliance Analysis Schema",
+                description="JSON Schema defining the compliance conflict fields",
             ),
         ],
     ) -> MetadataResponse:

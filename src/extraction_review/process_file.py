@@ -1,25 +1,27 @@
 import asyncio
-import json
 import logging
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 from llama_cloud import AsyncLlamaCloud
-from llama_cloud.types.beta.extracted_data import ExtractedData, InvalidExtractionData
-from llama_cloud.types.file_query_params import Filter
-from pydantic import BaseModel
+from llama_index.core.llms import LLM
+from llama_index.core.prompts import PromptTemplate
+from llama_index.llms.openai import OpenAI
+from pydantic import BaseModel, Field
 from workflows import Context, Workflow, step
 from workflows.events import Event, StartEvent, StopEvent
 from workflows.resource import Resource, ResourceConfig
 
 from .clients import agent_name, get_llama_cloud_client, project_id
-from .config import EXTRACTED_DATA_COLLECTION, ExtractConfig, get_extraction_schema
+from .config import EXTRACTED_DATA_COLLECTION, ParseConfig
 
 logger = logging.getLogger(__name__)
 
 
-class FileEvent(StartEvent):
-    file_id: str
-    file_hash: str | None = None
+class ComplianceStartEvent(StartEvent):
+    """Start event for compliance analysis with two documents."""
+
+    regulation_file_id: str = Field(description="File ID of the government regulation PDF")
+    policy_file_id: str = Field(description="File ID of the company policy PDF")
 
 
 class Status(Event):
@@ -27,205 +29,276 @@ class Status(Event):
     message: str
 
 
-class ExtractJobStartedEvent(Event):
+class ParseJobsStartedEvent(Event):
+    """Both documents are being parsed."""
+
     pass
 
 
-class ExtractedEvent(Event):
-    data: ExtractedData
+class ConflictItem(BaseModel):
+    """A single compliance conflict between regulation and policy."""
+
+    conflict_summary: str = Field(description="Brief description of the conflict")
+    regulation_page: int = Field(description="Page number in the regulation document")
+    regulation_text: str = Field(description="Text snippet from the regulation")
+    policy_page: int | None = Field(description="Page number in policy, or null if missing")
+    policy_text: str | None = Field(description="Text snippet from policy, or null if missing")
+    severity: Literal["critical", "major", "minor"] = Field(description="Severity level")
+    recommendation: str = Field(description="Suggested action to resolve")
 
 
-class ExtractedInvalidEvent(Event):
-    """Event for extraction results that failed validation."""
+class ComplianceAnalysisResult(BaseModel):
+    """Complete compliance analysis results."""
 
-    data: ExtractedData[dict[str, Any]]
-
-
-class ExtractionState(BaseModel):
-    file_id: str | None = None
-    filename: str | None = None
-    file_hash: str | None = None
-    extract_job_id: str | None = None
+    conflicts: list[ConflictItem] = Field(default_factory=list)
+    total_conflicts: int = Field(default=0)
+    critical_count: int = Field(default=0)
+    major_count: int = Field(default=0)
+    minor_count: int = Field(default=0)
 
 
-class ProcessFileWorkflow(Workflow):
-    """Extract structured data from a document and save it for review."""
+class AnalysisCompleteEvent(Event):
+    """Compliance analysis is complete."""
+
+    result: ComplianceAnalysisResult
+
+
+class ComplianceState(BaseModel):
+    regulation_file_id: str | None = None
+    regulation_filename: str | None = None
+    regulation_parse_job_id: str | None = None
+    policy_file_id: str | None = None
+    policy_filename: str | None = None
+    policy_parse_job_id: str | None = None
+
+
+def get_llm() -> LLM:
+    """LLM for compliance analysis."""
+    return OpenAI(model="gpt-4o", temperature=0)
+
+
+class ComplianceAnalysisWorkflow(Workflow):
+    """Analyze company policy against government regulations to identify compliance gaps.
+
+    Compares two documents and identifies every instance where the company policy
+    contradicts or fails to meet the regulatory requirements.
+    """
 
     @step()
-    async def start_extraction(
+    async def start_parsing(
         self,
-        event: FileEvent,
-        ctx: Context[ExtractionState],
-        llama_cloud_client: Annotated[
-            AsyncLlamaCloud, Resource(get_llama_cloud_client)
-        ],
-        extract_config: Annotated[
-            ExtractConfig,
+        event: ComplianceStartEvent,
+        ctx: Context[ComplianceState],
+        llama_cloud_client: Annotated[AsyncLlamaCloud, Resource(get_llama_cloud_client)],
+        parse_config: Annotated[
+            ParseConfig,
             ResourceConfig(
                 config_file="configs/config.json",
-                path_selector="extract",
-                label="Extraction Settings",
-                description="Configuration for document extraction quality and features",
+                path_selector="parse",
+                label="Parse Settings",
+                description="Configuration for document parsing quality",
             ),
         ],
-    ) -> ExtractJobStartedEvent:
-        """Start extraction job for the document."""
-        file_id = event.file_id
-        logger.info(f"Running file {file_id}")
-
-        # Get file metadata
-        try:
-            files = await llama_cloud_client.files.query(
-                filter=Filter(file_ids=[file_id])
-            )
-            file_metadata = files.items[0]
-            filename = file_metadata.name
-        except Exception as e:
-            logger.error(f"Error fetching file metadata {file_id}: {e}", exc_info=True)
-            ctx.write_event_to_stream(
-                Status(
-                    level="error",
-                    message=f"Error fetching file metadata {file_id}: {e}",
-                )
-            )
-            raise e
-
-        # Start extraction job
-        logger.info(f"Extracting data from file {filename}")
+    ) -> ParseJobsStartedEvent:
+        """Parse both regulation and policy documents to extract text with page numbers."""
         ctx.write_event_to_stream(
-            Status(level="info", message=f"Extracting data from file {filename}")
+            Status(level="info", message="Starting document analysis...")
         )
 
-        extract_job = await llama_cloud_client.extraction.run(
-            config=extract_config.settings.model_dump(),
-            data_schema=extract_config.json_schema,
-            file_id=file_id,
-            project_id=project_id,
+        # Get file metadata for both documents
+        from llama_cloud.types.file_query_params import Filter
+
+        files = await llama_cloud_client.files.query(
+            filter=Filter(file_ids=[event.regulation_file_id, event.policy_file_id])
         )
+        file_map = {f.id: f.name for f in files.items}
 
-        # Use file_hash from the event (computed by UI from file content)
-        # or fall back to external_file_id from file metadata for deduplication
-        file_hash = event.file_hash or file_metadata.external_file_id
+        regulation_name = file_map.get(event.regulation_file_id, "regulation.pdf")
+        policy_name = file_map.get(event.policy_file_id, "policy.pdf")
 
-        # Save state (mutation at end of step)
-        async with ctx.store.edit_state() as state:
-            state.file_id = file_id
-            state.filename = filename
-            state.file_hash = file_hash
-            state.extract_job_id = extract_job.id
-
-        return ExtractJobStartedEvent()
-
-    @step()
-    async def complete_extraction(
-        self,
-        event: ExtractJobStartedEvent,
-        ctx: Context[ExtractionState],
-        llama_cloud_client: Annotated[
-            AsyncLlamaCloud, Resource(get_llama_cloud_client)
-        ],
-        extract_config: Annotated[
-            ExtractConfig,
-            ResourceConfig(
-                config_file="configs/config.json",
-                path_selector="extract",
-                label="Extraction Settings",
-                description="Configuration for document extraction quality and features",
-            ),
-        ],
-    ) -> StopEvent:
-        """Wait for extraction to complete, validate results, and save for review."""
-        state = await ctx.store.get_state()
-        if state.extract_job_id is None:
-            raise ValueError("Job ID cannot be null when waiting for its completion")
-
-        # Wait for extraction job to complete
-        await llama_cloud_client.extraction.jobs.wait_for_completion(
-            state.extract_job_id
-        )
-
-        # Get extraction result
-        extracted_result = await llama_cloud_client.extraction.jobs.get_result(
-            state.extract_job_id
-        )
-        extract_run = await llama_cloud_client.extraction.runs.get(
-            run_id=extracted_result.run_id
-        )
-
-        # Validate and parse extraction result
-        extracted_event: ExtractedEvent | ExtractedInvalidEvent
-        try:
-            logger.info(
-                f"Extracted data: {json.dumps(extracted_result.model_dump(), indent=2)}"
-            )
-            # Create dynamic Pydantic model from JSON schema
-            schema_class = get_extraction_schema(extract_config.json_schema)
-            # Use from_extraction_result for proper metadata extraction
-            data = ExtractedData.from_extraction_result(
-                result=extract_run,
-                schema=schema_class,
-                file_name=state.filename,
-                file_id=state.file_id,
-                file_hash=state.file_hash,
-            )
-            extracted_event = ExtractedEvent(data=data)
-        except InvalidExtractionData as e:
-            logger.error(f"Error validating extracted data: {e}", exc_info=True)
-            extracted_event = ExtractedInvalidEvent(data=e.invalid_item)
-        except Exception as e:
-            logger.error(
-                f"Error extracting data from file {state.filename}: {e}",
-                exc_info=True,
-            )
-            ctx.write_event_to_stream(
-                Status(
-                    level="error",
-                    message=f"Error extracting data from file {state.filename}: {e}",
-                )
-            )
-            raise e
-
-        # Stream the extracted event to client
-        ctx.write_event_to_stream(extracted_event)
-
-        # Save extracted data for review
-        extracted_data = extracted_event.data
-        data_dict = extracted_data.model_dump()
-        # Remove past data when reprocessing the same file
-        if extracted_data.file_hash is not None:
-            delete_result = await llama_cloud_client.beta.agent_data.delete_by_query(
-                deployment_name=agent_name or "_public",
-                collection=EXTRACTED_DATA_COLLECTION,
-                filter={
-                    "file_hash": {
-                        "eq": extracted_data.file_hash,
-                    },
-                },
-            )
-            if delete_result.deleted_count > 0:
-                logger.info(
-                    f"Removed {delete_result.deleted_count} existing record(s) "
-                    f"for file {extracted_data.file_name}"
-                )
-        # finally, save the new data
-        item = await llama_cloud_client.beta.agent_data.agent_data(
-            data=data_dict,
-            deployment_name=agent_name or "_public",
-            collection=EXTRACTED_DATA_COLLECTION,
-        )
-        logger.info(
-            f"Recorded extracted data for file {extracted_data.file_name or ''}"
-        )
         ctx.write_event_to_stream(
             Status(
                 level="info",
-                message=f"Recorded extracted data for file {extracted_data.file_name or ''}",
+                message=f"Parsing regulation: {regulation_name} and policy: {policy_name}",
             )
         )
+
+        # Start parse jobs for both documents in parallel
+        regulation_job, policy_job = await asyncio.gather(
+            llama_cloud_client.parsing.create(
+                tier=parse_config.settings.tier,
+                version=parse_config.settings.version,
+                file_id=event.regulation_file_id,
+                project_id=project_id,
+            ),
+            llama_cloud_client.parsing.create(
+                tier=parse_config.settings.tier,
+                version=parse_config.settings.version,
+                file_id=event.policy_file_id,
+                project_id=project_id,
+            ),
+        )
+
+        async with ctx.store.edit_state() as state:
+            state.regulation_file_id = event.regulation_file_id
+            state.regulation_filename = regulation_name
+            state.regulation_parse_job_id = regulation_job.id
+            state.policy_file_id = event.policy_file_id
+            state.policy_filename = policy_name
+            state.policy_parse_job_id = policy_job.id
+
+        return ParseJobsStartedEvent()
+
+    @step()
+    async def analyze_compliance(
+        self,
+        event: ParseJobsStartedEvent,
+        ctx: Context[ComplianceState],
+        llama_cloud_client: Annotated[AsyncLlamaCloud, Resource(get_llama_cloud_client)],
+        llm: Annotated[LLM, Resource(get_llm)],
+    ) -> AnalysisCompleteEvent:
+        """Wait for parsing to complete and analyze for compliance conflicts."""
+        state = await ctx.store.get_state()
+
+        ctx.write_event_to_stream(
+            Status(level="info", message="Extracting text from documents...")
+        )
+
+        # Wait for both parse jobs to complete
+        await asyncio.gather(
+            llama_cloud_client.parsing.wait_for_completion(state.regulation_parse_job_id),
+            llama_cloud_client.parsing.wait_for_completion(state.policy_parse_job_id),
+        )
+
+        # Get results with page-level markdown
+        regulation_result, policy_result = await asyncio.gather(
+            llama_cloud_client.parsing.get(state.regulation_parse_job_id, expand=["markdown"]),
+            llama_cloud_client.parsing.get(state.policy_parse_job_id, expand=["markdown"]),
+        )
+
+        # Build page-indexed text for each document
+        regulation_pages = self._extract_pages(regulation_result)
+        policy_pages = self._extract_pages(policy_result)
+
+        ctx.write_event_to_stream(
+            Status(
+                level="info",
+                message=f"Analyzing {len(regulation_pages)} regulation pages against {len(policy_pages)} policy pages...",
+            )
+        )
+
+        # Format documents for analysis
+        regulation_text = self._format_document_with_pages(regulation_pages, "REGULATION")
+        policy_text = self._format_document_with_pages(policy_pages, "COMPANY POLICY")
+
+        # Analyze for compliance conflicts using LLM
+        result = await self._analyze_conflicts(llm, regulation_text, policy_text)
+
+        ctx.write_event_to_stream(
+            Status(
+                level="info",
+                message=f"Found {result.total_conflicts} compliance conflicts ({result.critical_count} critical, {result.major_count} major, {result.minor_count} minor)",
+            )
+        )
+
+        return AnalysisCompleteEvent(result=result)
+
+    @step()
+    async def save_results(
+        self,
+        event: AnalysisCompleteEvent,
+        ctx: Context[ComplianceState],
+        llama_cloud_client: Annotated[AsyncLlamaCloud, Resource(get_llama_cloud_client)],
+    ) -> StopEvent:
+        """Save compliance analysis results for review."""
+        state = await ctx.store.get_state()
+        result = event.result
+
+        # Build the data record
+        data = {
+            "regulation_file_id": state.regulation_file_id,
+            "regulation_filename": state.regulation_filename,
+            "policy_file_id": state.policy_file_id,
+            "policy_filename": state.policy_filename,
+            **result.model_dump(),
+        }
+
+        # Save to Agent Data
+        item = await llama_cloud_client.beta.agent_data.agent_data(
+            data=data,
+            deployment_name=agent_name or "_public",
+            collection=EXTRACTED_DATA_COLLECTION,
+        )
+
+        ctx.write_event_to_stream(
+            Status(level="info", message="Compliance analysis complete and saved.")
+        )
+
         return StopEvent(result=item.id)
 
+    def _extract_pages(self, parse_result) -> dict[int, str]:
+        """Extract page content from parse result."""
+        pages = {}
+        if parse_result.markdown and parse_result.markdown.pages:
+            for page in parse_result.markdown.pages:
+                page_num = page.page_number
+                content = page.markdown if hasattr(page, "markdown") else ""
+                if content:
+                    pages[page_num] = content
+        return pages
 
-workflow = ProcessFileWorkflow(timeout=None)
+    def _format_document_with_pages(self, pages: dict[int, str], doc_type: str) -> str:
+        """Format document content with page markers."""
+        sections = [f"=== {doc_type} ==="]
+        for page_num in sorted(pages.keys()):
+            sections.append(f"\n--- Page {page_num} ---\n{pages[page_num]}")
+        return "\n".join(sections)
+
+    async def _analyze_conflicts(
+        self, llm: LLM, regulation_text: str, policy_text: str
+    ) -> ComplianceAnalysisResult:
+        """Use LLM to identify compliance conflicts."""
+        prompt = PromptTemplate(
+            """You are a compliance analyst comparing a government regulation against a company policy.
+
+Your task is to identify every instance where the company policy:
+1. CONTRADICTS a requirement in the regulation
+2. FAILS TO MEET a standard specified in the regulation
+3. OMITS a required element that the regulation mandates
+
+For each conflict found, provide:
+- A clear summary of the conflict
+- The exact page number and relevant text from the REGULATION
+- The page number and text from the COMPANY POLICY (use null if the requirement is completely missing)
+- Severity: "critical" (legal risk/major violation), "major" (significant gap), or "minor" (small discrepancy)
+- A specific recommendation to resolve the issue
+
+Be thorough and identify ALL conflicts, even minor ones. Quote the actual text from both documents.
+
+{regulation_text}
+
+{policy_text}
+
+Analyze these documents and identify all compliance conflicts."""
+        )
+
+        result = await llm.astructured_predict(
+            ComplianceAnalysisResult,
+            prompt,
+            regulation_text=regulation_text,
+            policy_text=policy_text,
+        )
+
+        # Ensure counts are correct
+        result.total_conflicts = len(result.conflicts)
+        result.critical_count = sum(1 for c in result.conflicts if c.severity == "critical")
+        result.major_count = sum(1 for c in result.conflicts if c.severity == "major")
+        result.minor_count = sum(1 for c in result.conflicts if c.severity == "minor")
+
+        return result
+
+
+workflow = ComplianceAnalysisWorkflow(timeout=None)
 
 if __name__ == "__main__":
     from pathlib import Path
@@ -236,10 +309,20 @@ if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
 
     async def main():
-        file = await get_llama_cloud_client().files.create(
-            file=Path("test.pdf").open("rb"),
-            purpose="extract",
+        client = get_llama_cloud_client()
+        regulation_file = await client.files.create(
+            file=Path("regulation.pdf").open("rb"),
+            purpose="parse",
         )
-        await workflow.run(start_event=FileEvent(file_id=file.id))
+        policy_file = await client.files.create(
+            file=Path("policy.pdf").open("rb"),
+            purpose="parse",
+        )
+        await workflow.run(
+            start_event=ComplianceStartEvent(
+                regulation_file_id=regulation_file.id,
+                policy_file_id=policy_file.id,
+            )
+        )
 
     asyncio.run(main())

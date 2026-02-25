@@ -3,21 +3,63 @@
     "json_schema": {
       "type": "object",
       "properties": {
-        "document_type": {
-          "type": "string",
-          "description": "An overarching category for the type of document (e.g. invoice, purchase order, etc.)"
-        },
-        "summary": {
-          "type": "string",
-          "description": "A 2-3 sentence summary describing the content of the document"
-        },
-        "key_points": {
+        "conflicts": {
           "type": "array",
-          "items": { "type": "string" },
-          "description": "A list of key points or insights from the document"
+          "description": "List of compliance conflicts found between the regulation and company policy",
+          "items": {
+            "type": "object",
+            "properties": {
+              "conflict_summary": {
+                "type": "string",
+                "description": "Brief description of the conflict or compliance gap"
+              },
+              "regulation_page": {
+                "type": "integer",
+                "description": "Page number in the government regulation document"
+              },
+              "regulation_text": {
+                "type": "string",
+                "description": "Relevant text snippet from the government regulation"
+              },
+              "policy_page": {
+                "type": ["integer", "null"],
+                "description": "Page number in the company policy document, or null if requirement is missing entirely"
+              },
+              "policy_text": {
+                "type": ["string", "null"],
+                "description": "Relevant text snippet from the company policy, or null if requirement is missing"
+              },
+              "severity": {
+                "type": "string",
+                "enum": ["critical", "major", "minor"],
+                "description": "Severity level of the compliance gap"
+              },
+              "recommendation": {
+                "type": "string",
+                "description": "Suggested action to resolve the compliance gap"
+              }
+            },
+            "required": ["conflict_summary", "regulation_page", "regulation_text", "policy_page", "policy_text", "severity", "recommendation"]
+          }
+        },
+        "total_conflicts": {
+          "type": "integer",
+          "description": "Total number of compliance conflicts identified"
+        },
+        "critical_count": {
+          "type": "integer",
+          "description": "Number of critical severity conflicts"
+        },
+        "major_count": {
+          "type": "integer",
+          "description": "Number of major severity conflicts"
+        },
+        "minor_count": {
+          "type": "integer",
+          "description": "Number of minor severity conflicts"
         }
       },
-      "required": ["document_type", "summary", "key_points"]
+      "required": ["conflicts", "total_conflicts", "critical_count", "major_count", "minor_count"]
     },
     "settings": {
       "extraction_mode": "PREMIUM",
@@ -28,6 +70,12 @@
       "confidence_scores": true
     }
   },
+  "parse": {
+    "settings": {
+      "tier": "agentic",
+      "version": "latest"
+    }
+  },
   "split": {
     "categories": [],
     "settings": {}
@@ -35,11 +83,5 @@
   "classify": {
     "rules": [],
     "settings": {}
-  },
-  "parse": {
-    "settings": {
-      "tier": "agentic",
-      "version": "latest"
-    }
   }
 }
