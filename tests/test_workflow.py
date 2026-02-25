@@ -33,19 +33,13 @@ def mock_llm_response() -> ComplianceAnalysisResult:
     return ComplianceAnalysisResult(
         conflicts=[
             ConflictItem(
-                conflict_summary="Policy allows 30-day data retention but regulation requires 7-day limit",
-                regulation_page=1,
-                regulation_text="Data must be deleted within 7 days of collection.",
+                regulation_clause="Data must be deleted within 7 days of collection.",
+                policy_violation="Policy allows 30-day data retention, exceeding the 7-day limit.",
+                severity="High",
+                gov_page=1,
                 policy_page=1,
-                policy_text="Data may be retained for up to 30 days.",
-                severity="critical",
-                recommendation="Update policy to require 7-day data deletion.",
             ),
         ],
-        total_conflicts=1,
-        critical_count=1,
-        major_count=0,
-        minor_count=0,
     )
 
 

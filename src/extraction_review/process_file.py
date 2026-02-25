@@ -38,23 +38,17 @@ class ParseJobsStartedEvent(Event):
 class ConflictItem(BaseModel):
     """A single compliance conflict between regulation and policy."""
 
-    conflict_summary: str = Field(description="Brief description of the conflict")
-    regulation_page: int = Field(description="Page number in the regulation document")
-    regulation_text: str = Field(description="Text snippet from the regulation")
-    policy_page: int | None = Field(description="Page number in policy, or null if missing")
-    policy_text: str | None = Field(description="Text snippet from policy, or null if missing")
-    severity: Literal["critical", "major", "minor"] = Field(description="Severity level")
-    recommendation: str = Field(description="Suggested action to resolve")
+    regulation_clause: str = Field(description="The specific clause or requirement from the government regulation")
+    policy_violation: str = Field(description="How the company policy violates or fails to meet the regulation")
+    severity: Literal["High", "Medium", "Low"] = Field(description="Severity level of the violation")
+    gov_page: int = Field(description="Page number in the government regulation document")
+    policy_page: int | None = Field(description="Page number in the company policy, or null if missing")
 
 
 class ComplianceAnalysisResult(BaseModel):
     """Complete compliance analysis results."""
 
     conflicts: list[ConflictItem] = Field(default_factory=list)
-    total_conflicts: int = Field(default=0)
-    critical_count: int = Field(default=0)
-    major_count: int = Field(default=0)
-    minor_count: int = Field(default=0)
 
 
 class AnalysisCompleteEvent(Event):
@@ -194,10 +188,13 @@ class ComplianceAnalysisWorkflow(Workflow):
         # Analyze for compliance conflicts using LLM
         result = await self._analyze_conflicts(llm, regulation_text, policy_text)
 
+        high = sum(1 for c in result.conflicts if c.severity == "High")
+        medium = sum(1 for c in result.conflicts if c.severity == "Medium")
+        low = sum(1 for c in result.conflicts if c.severity == "Low")
         ctx.write_event_to_stream(
             Status(
                 level="info",
-                message=f"Found {result.total_conflicts} compliance conflicts ({result.critical_count} critical, {result.major_count} major, {result.minor_count} minor)",
+                message=f"Found {len(result.conflicts)} compliance conflicts ({high} High, {medium} Medium, {low} Low)",
             )
         )
 
@@ -267,13 +264,13 @@ Your task is to identify every instance where the company policy:
 3. OMITS a required element that the regulation mandates
 
 For each conflict found, provide:
-- A clear summary of the conflict
-- The exact page number and relevant text from the REGULATION
-- The page number and text from the COMPANY POLICY (use null if the requirement is completely missing)
-- Severity: "critical" (legal risk/major violation), "major" (significant gap), or "minor" (small discrepancy)
-- A specific recommendation to resolve the issue
+- regulation_clause: The specific clause or requirement text from the government regulation
+- policy_violation: How the company policy violates or fails to meet this requirement
+- severity: "High" (legal risk/major violation), "Medium" (significant gap), or "Low" (minor discrepancy)
+- gov_page: The page number in the government regulation document
+- policy_page: The page number in the company policy (use null if the requirement is completely missing)
 
-Be thorough and identify ALL conflicts, even minor ones. Quote the actual text from both documents.
+Be thorough and identify ALL conflicts. Quote the actual text from both documents.
 
 {regulation_text}
 
@@ -282,20 +279,12 @@ Be thorough and identify ALL conflicts, even minor ones. Quote the actual text f
 Analyze these documents and identify all compliance conflicts."""
         )
 
-        result = await llm.astructured_predict(
+        return await llm.astructured_predict(
             ComplianceAnalysisResult,
             prompt,
             regulation_text=regulation_text,
             policy_text=policy_text,
         )
-
-        # Ensure counts are correct
-        result.total_conflicts = len(result.conflicts)
-        result.critical_count = sum(1 for c in result.conflicts if c.severity == "critical")
-        result.major_count = sum(1 for c in result.conflicts if c.severity == "major")
-        result.minor_count = sum(1 for c in result.conflicts if c.severity == "minor")
-
-        return result
 
 
 workflow = ComplianceAnalysisWorkflow(timeout=None)

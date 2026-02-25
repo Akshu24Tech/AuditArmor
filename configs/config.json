@@ -9,57 +9,33 @@
           "items": {
             "type": "object",
             "properties": {
-              "conflict_summary": {
+              "regulation_clause": {
                 "type": "string",
-                "description": "Brief description of the conflict or compliance gap"
+                "description": "The specific clause or requirement from the government regulation"
               },
-              "regulation_page": {
-                "type": "integer",
-                "description": "Page number in the government regulation document"
-              },
-              "regulation_text": {
+              "policy_violation": {
                 "type": "string",
-                "description": "Relevant text snippet from the government regulation"
-              },
-              "policy_page": {
-                "type": ["integer", "null"],
-                "description": "Page number in the company policy document, or null if requirement is missing entirely"
-              },
-              "policy_text": {
-                "type": ["string", "null"],
-                "description": "Relevant text snippet from the company policy, or null if requirement is missing"
+                "description": "How the company policy violates or fails to meet the regulation requirement"
               },
               "severity": {
                 "type": "string",
-                "enum": ["critical", "major", "minor"],
-                "description": "Severity level of the compliance gap"
+                "enum": ["High", "Medium", "Low"],
+                "description": "Severity level of the compliance violation"
               },
-              "recommendation": {
-                "type": "string",
-                "description": "Suggested action to resolve the compliance gap"
+              "gov_page": {
+                "type": "integer",
+                "description": "Page number in the government regulation document"
+              },
+              "policy_page": {
+                "type": ["integer", "null"],
+                "description": "Page number in the company policy document, or null if requirement is missing"
               }
             },
-            "required": ["conflict_summary", "regulation_page", "regulation_text", "policy_page", "policy_text", "severity", "recommendation"]
+            "required": ["regulation_clause", "policy_violation", "severity", "gov_page", "policy_page"]
           }
-        },
-        "total_conflicts": {
-          "type": "integer",
-          "description": "Total number of compliance conflicts identified"
-        },
-        "critical_count": {
-          "type": "integer",
-          "description": "Number of critical severity conflicts"
-        },
-        "major_count": {
-          "type": "integer",
-          "description": "Number of major severity conflicts"
-        },
-        "minor_count": {
-          "type": "integer",
-          "description": "Number of minor severity conflicts"
         }
       },
-      "required": ["conflicts", "total_conflicts", "critical_count", "major_count", "minor_count"]
+      "required": ["conflicts"]
     },
     "settings": {
       "extraction_mode": "PREMIUM",
