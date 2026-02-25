@@ -52,6 +52,7 @@ timeout_method = "thread"
 [tool.llamadeploy]
 env_files = [".env"]
 llama_cloud = true
+required_env_vars = ["OPENAI_API_KEY"]
 
 [tool.llamadeploy.workflows]
 process-file = "extraction_review.process_file:workflow"
