@@ -1,4 +1,4 @@
-AuditArmor 🛡️🔍
+## AuditArmor 🛡️🔍
 
 An Intelligent Regulatory Redline Agent built for the LlamaAgents Builder Contest.
 
